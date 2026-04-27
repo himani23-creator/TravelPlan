@@ -9,7 +9,17 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from sentence_transformers import SentenceTransformer
+from langchain_core.embeddings import Embeddings as LCEmbeddings
+
+# Custom embeddings — avoids langchain-huggingface which conflicts with langchain-core 1.x
+class STEmbeddings(LCEmbeddings):
+    def __init__(self, model_name: str):
+        self.model = SentenceTransformer(model_name)
+    def embed_documents(self, texts):
+        return self.model.encode(texts, normalize_embeddings=True).tolist()
+    def embed_query(self, text: str):
+        return self.model.encode([text], normalize_embeddings=True)[0].tolist()
 from langchain_groq import ChatGroq
 
 # ── Page Config ────────────────────────────────────────────────────────────────
@@ -161,7 +171,7 @@ Apps: Google Maps offline, Google Translate camera, XE Currency.""",
     {"content": """Solo Travel: Safest cities Tokyo, Lisbon, Medellin.
 Meeting people: hostel common rooms, walking tours (tip-based).
 Female solo travel: Japan, Iceland, Portugal, New Zealand safest.
-     Digital nomad hubs: Chiang Mai, Medellin, Lisbon, Tbilisi — under $2000/month.""",
+Digital nomad hubs: Chiang Mai, Medellin, Lisbon, Tbilisi — under $2000/month.""",
      "metadata": {"destination": "general", "type": "solo_travel", "source": "reddit_solotravel"}},
 ]
 
@@ -187,11 +197,7 @@ Format with clear headings: ## Overview | ## Day-by-Day | ## Food & Dining | ## 
 # ── Cached vectorstore (builds once per session) ───────────────────────────────
 @st.cache_resource(show_spinner="⏳ Loading knowledge base & embeddings (first time only ~60s)...")
 def get_vectorstore():
-    embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+    embeddings = STEmbeddings("all-MiniLM-L6-v2")
     docs = [Document(page_content=d["content"], metadata=d["metadata"]) for d in TRAVEL_KB]
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_documents(docs)
@@ -300,7 +306,8 @@ if plan_btn:
                 )
 
                 result = chain.invoke(query)
-             # ── Display itinerary ──────────────────────────────────────────────
+
+            # ── Display itinerary ──────────────────────────────────────────────
             st.success("✅ Itinerary generated!")
 
             col1, col2, col3 = st.columns(3)

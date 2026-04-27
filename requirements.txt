@@ -3,7 +3,6 @@ langchain==1.2.15
 langchain-community==0.3.31
 langchain-core==1.2.15
 langchain-groq==1.1.2
-langchain-huggingface==0.1.2
 langchain-text-splitters==0.3.8
 chromadb==0.6.3
 sentence-transformers==3.4.1
