@@ -1,0 +1,10 @@
+solara
+langchain
+langchain-community
+langchain-groq
+langchain-huggingface
+langchain-text-splitters
+langchain-core
+chromadb
+sentence-transformers
+tiktoken
