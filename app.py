@@ -1,7 +1,6 @@
-import solara
+import streamlit as st
 import os
 import warnings
-import threading
 warnings.filterwarnings("ignore")
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -12,8 +11,84 @@ from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from typing import List, Dict, Any
-from dataclasses import dataclass
+
+# ── Page Config ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="🌍 RAG Travel Planner",
+    page_icon="🌍",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Custom CSS ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+/* Dark gradient header */
+.tp-header {
+    background: linear-gradient(135deg, #0d1b2e 0%, #0a3d62 50%, #0d1b2e 100%);
+    border-radius: 16px;
+    padding: 32px 40px;
+    text-align: center;
+    margin-bottom: 24px;
+    border: 1px solid #1a4a70;
+}
+.tp-header h1 { color: #e8f4ff; font-size: 2.4rem; font-weight: 800;
+    margin: 0 0 8px; letter-spacing: -0.5px; }
+.tp-header p  { color: #7ba7cc; font-size: 1rem; margin: 0; }
+.tp-badge {
+    display: inline-block; background: #1e3a5f; color: #5cb8ff;
+    border: 1px solid #2a5080; border-radius: 20px;
+    padding: 4px 14px; font-size: 0.78rem; margin-top: 10px;
+    font-weight: 600;
+}
+
+/* Result card */
+.tp-result {
+    background: #0d1b2e;
+    border: 1px solid #1a4a70;
+    border-radius: 14px;
+    padding: 28px 32px;
+    color: #cdd9ef;
+    line-height: 1.8;
+}
+
+/* Source badge */
+.tp-source {
+    display: inline-block; background: #0a2a45; color: #5cb8ff;
+    border: 1px solid #1a4a70; border-radius: 20px;
+    padding: 4px 14px; font-size: 0.76rem; margin: 3px 3px 0 0;
+    font-weight: 600;
+}
+
+/* Sidebar styling */
+section[data-testid="stSidebar"] {
+    background: #0d1b2e;
+    border-right: 1px solid #1a3a5c;
+}
+section[data-testid="stSidebar"] label { color: #7ba7cc !important; font-weight: 600; }
+section[data-testid="stSidebar"] .stTextInput input,
+section[data-testid="stSidebar"] .stSelectbox select {
+    background: #162032 !important;
+    color: #e8f4ff !important;
+    border: 1px solid #1a4a70 !important;
+    border-radius: 8px !important;
+}
+
+/* Streamlit button */
+.stButton > button {
+    background: linear-gradient(135deg, #1565c0, #0d47a1) !important;
+    color: white !important; font-weight: 700 !important;
+    border-radius: 10px !important; border: none !important;
+    padding: 12px 24px !important; font-size: 1rem !important;
+    width: 100% !important; transition: opacity 0.2s !important;
+}
+.stButton > button:hover { opacity: 0.85 !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ── Knowledge Base ─────────────────────────────────────────────────────────────
 TRAVEL_KB = [
@@ -70,6 +145,7 @@ The Met Museum pay-what-you-wish ($0-$30). Brooklyn Bridge walk free, best views
 High Line Park free. Staten Island Ferry free, best Statue of Liberty views.
 Hidden gems: The Morgan Library, Tenement Museum, Governors Island.""",
      "metadata": {"destination": "New York", "type": "general_guide", "source": "nyc_guide"}},
+
     {"content": """NYC Food: Best pizza Di Fara (Brooklyn, $5/slice), Joe's Pizza Greenwich Village.
 Bagels: Absolute Bagels Upper West Side. Chinatown: Joe's Shanghai soup dumplings.
 Smorgasburg: weekends in Williamsburg, 100+ food vendors.
@@ -84,9 +160,8 @@ Apps: Google Maps offline, Google Translate camera, XE Currency.""",
 
     {"content": """Solo Travel: Safest cities Tokyo, Lisbon, Medellin.
 Meeting people: hostel common rooms, walking tours (tip-based).
-Share itinerary with family, check in daily.
 Female solo travel: Japan, Iceland, Portugal, New Zealand safest.
-Digital nomad hubs: Chiang Mai, Medellin, Lisbon, Tbilisi — under $2000/month.""",
+     Digital nomad hubs: Chiang Mai, Medellin, Lisbon, Tbilisi — under $2000/month.""",
      "metadata": {"destination": "general", "type": "solo_travel", "source": "reddit_solotravel"}},
 ]
 
@@ -106,299 +181,163 @@ Using ONLY the retrieved context:
 5. Flag warnings and things to avoid
 6. Mark [Research needed] if context doesn't cover something
 
-Format with headings: Overview | Day-by-Day | Food & Dining | Budget | Pro Tips | Warnings\
+Format with clear headings: ## Overview | ## Day-by-Day | ## Food & Dining | ## Budget | ## Pro Tips | ## Warnings\
 """
 
-# ── Global singletons (lazy-init) ──────────────────────────────────────────────
-_embeddings = None
-_vectorstore = None
-
-def _get_vectorstore():
-    global _embeddings, _vectorstore
-    if _vectorstore is None:
-        _embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
-        )
-        docs = [Document(page_content=d["content"], metadata=d["metadata"]) for d in TRAVEL_KB]
-        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = splitter.split_documents(docs)
-        _vectorstore = Chroma.from_documents(documents=chunks, embedding=_embeddings)
-    return _vectorstore
-
-# ── Reactive state ─────────────────────────────────────────────────────────────
-groq_key      = solara.reactive("")
-destination   = solara.reactive("Paris")
-duration      = solara.reactive(4)
-budget        = solara.reactive("mid-range")
-style         = solara.reactive("food and culture")
-group         = solara.reactive("couple")
-interests_txt = solara.reactive("local food, museums, wine bars")
-itinerary     = solara.reactive("")
-sources       = solara.reactive([])
-loading       = solara.reactive(False)
-status_msg    = solara.reactive("")
-error_msg     = solara.reactive("")
-
-# ── Core logic ─────────────────────────────────────────────────────────────────
-def run_rag():
-    if not groq_key.value.strip():
-        error_msg.value = "⚠️ Please enter your Groq API key first."
-        return
-
-    loading.value   = True
-    error_msg.value = ""
-    itinerary.value = ""
-    sources.value   = []
-
-    try:
-        status_msg.value = "⏳ Loading knowledge base & embeddings..."
-        vs = _get_vectorstore()
-
-        status_msg.value = "🤖 Initialising Groq LLM..."
-        llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0.7,
-            max_tokens=2048,
-            groq_api_key=groq_key.value.strip(),
-        )
-
-        retriever = vs.as_retriever(search_type="similarity", search_kwargs={"k": 4})
-        prompt    = ChatPromptTemplate.from_messages([
-            ("system", RAG_SYSTEM),
-            ("human", "{input}"),
-        ])
-
-        def fmt(docs): return "\n\n".join(d.page_content for d in docs)
-
-        chain = (
-            RunnableParallel(
-                context=retriever | fmt,
-                raw_docs=retriever,
-                input=RunnablePassthrough(),
-            )
-            | RunnableParallel(
-                answer=prompt | llm | StrOutputParser(),
-                context=lambda x: x["raw_docs"],
-            )
-        )
-
-        interests = [i.strip() for i in interests_txt.value.split(",") if i.strip()]
-        query = (
-            f"Plan a {duration.value}-day {budget.value} {style.value} trip to "
-            f"{destination.value} for {group.value} traveller interested in "
-            f"{', '.join(interests) if interests else 'general sightseeing'}. "
-            "Include restaurants, attractions, budget breakdown, insider tips."
-        )
-
-        status_msg.value = "🔍 Retrieving context & generating itinerary..."
-        result = chain.invoke(query)
-
-        itinerary.value = result["answer"]
-        sources.value   = [
-            {"destination": d.metadata.get("destination"),
-             "type": d.metadata.get("type"),
-             "source": d.metadata.get("source")}
-            for d in result.get("context", [])
-        ]
-        status_msg.value = "✅ Done!"
-
-    except Exception as exc:
-        error_msg.value  = f"❌ {exc}"
-        status_msg.value = ""
-    finally:
-        loading.value = False
-def plan_trip():
-    t = threading.Thread(target=run_rag, daemon=True)
-    t.start()
-
-CSS = """
-body { background: #0f1117; font-family: 'Inter', sans-serif; }
-
-.tp-header {
-    background: linear-gradient(135deg, #1a1f35 0%, #0d3b5e 50%, #1a1f35 100%);
-    border-bottom: 1px solid #2a3a5c;
-    padding: 28px 40px 20px;
-    text-align: center;
-}
-.tp-header h1 { font-size: 2.2rem; font-weight: 800; color: #e8f4ff;
-    letter-spacing: -0.5px; margin: 0 0 6px; }
-.tp-header p  { color: #7ba7cc; font-size: 0.95rem; margin: 0; }
-
-.tp-badge {
-    display: inline-block; background: #1e3a5f; color: #5cb8ff;
-    border: 1px solid #2a5080; border-radius: 20px;
-    padding: 3px 12px; font-size: 0.75rem; margin-top: 8px;
-}
-
-.tp-panel {
-    background: #161b2e; border: 1px solid #242d45;
-    border-radius: 14px; padding: 22px 20px; margin: 16px;
-}
-.tp-panel-title {
-    font-size: 0.8rem; font-weight: 700; color: #5cb8ff;
-    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px;
-}
-
-.tp-btn {
-    background: linear-gradient(135deg, #1565c0, #0d47a1) !important;
-    color: #fff !important; font-weight: 700 !important;
-    border-radius: 10px !important; padding: 14px !important;
-    font-size: 1rem !important; width: 100% !important;
-    border: none !important; cursor: pointer !important;
-    transition: opacity 0.2s !important;
-}
-.tp-btn:hover { opacity: 0.88 !important; }
-.tp-btn:disabled { opacity: 0.5 !important; cursor: not-allowed !important; }
-
-.tp-result {
-    background: #161b2e; border: 1px solid #242d45;
-    border-radius: 14px; padding: 28px 30px; margin: 16px;
-    color: #cdd9ef; line-height: 1.75;
-}
-.tp-result h2, .tp-result h3 { color: #5cb8ff; }
-
-.tp-source-badge {
-    display: inline-block; background: #0d2d4a; color: #5cb8ff;
-    border: 1px solid #1a4a70; border-radius: 20px;
-    padding: 4px 14px; font-size: 0.75rem; margin: 4px 4px 0 0;
-}
-
-.tp-status {
-    color: #7ba7cc; font-size: 0.9rem;
-    text-align: center; padding: 10px 0;
-}
-.tp-error {
-    background: #2d1a1a; color: #ff6b6b;
-    border: 1px solid #5a2a2a; border-radius: 10px; padding: 12px 16px;
-    font-size: 0.9rem; margin: 12px 16px;
-}
-.tp-placeholder {
-    text-align: center; padding: 60px 30px; color: #3a4a6a;
-}
-.tp-placeholder-icon { font-size: 3rem; margin-bottom: 12px; }
-.tp-placeholder p { font-size: 0.95rem; }
-
-.v-input__slot { background: #1e2640 !important; border-radius: 8px !important; }
-.v-label { color: #7ba7cc !important; font-size: 0.82rem !important; }
-.v-select__selection, .v-text-field input { color: #cdd9ef !important; }
-"""
-
-
-# ── Components ─────────────────────────────────────────────────────────────────
-@solara.component
-def Header():
-    solara.HTML("div", unsafe_innerHTML="""
-        <div class='tp-header'>
-          <h1>🌍 RAG Travel Planner</h1>
-          <p>5-Layer Retrieval-Augmented Generation · Powered by Groq + ChromaDB</p>
-          <span class='tp-badge'>LangChain 1.2.15 · Llama 3.3 70B · Free</span>
-        </div>
-    """)
-
-@solara.component
-def InputPanel():
-    solara.HTML("div", unsafe_innerHTML="<div class='tp-panel-title'>🗺️ Trip Details</div>")
-
-    solara.InputText(
-        label="🔑 Groq API Key (free at console.groq.com)",
-        value=groq_key, password=True,
-        style="margin-bottom:12px",
+# ── Cached vectorstore (builds once per session) ───────────────────────────────
+@st.cache_resource(show_spinner="⏳ Loading knowledge base & embeddings (first time only ~60s)...")
+def get_vectorstore():
+    embeddings = HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
     )
-    solara.InputText(
-        label="📍 Destination",
-        value=destination,
-        style="margin-bottom:12px",
+    docs = [Document(page_content=d["content"], metadata=d["metadata"]) for d in TRAVEL_KB]
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_documents(docs)
+    return Chroma.from_documents(documents=chunks, embedding=embeddings)
+
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class='tp-header'>
+  <h1>🌍 RAG Travel Planner</h1>
+  <p>5-Layer Retrieval-Augmented Generation · Semantic search over real travel knowledge</p>
+  <span class='tp-badge'>LangChain 1.2.15 · Groq Llama 3.3 70B · ChromaDB · 100% Free</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Sidebar Inputs ─────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚙️ Trip Settings")
+
+    groq_key = st.text_input(
+        "🔑 Groq API Key",
+        type="password",
+        placeholder="gsk_...",
+        help="Free key from console.groq.com — no credit card needed",
     )
-    solara.SliderInt(
-        label=f"📅 Duration: {duration.value} days",
-        value=duration, min=1, max=14,
+    st.caption("👆 Get free key at [console.groq.com](https://console.groq.com)")
+    st.divider()
+
+    destination = st.text_input("📍 Destination", value="Paris")
+
+    duration = st.slider("📅 Duration (days)", min_value=1, max_value=14, value=4)
+
+    budget = st.selectbox(
+        "💰 Budget Level",
+        ["budget", "mid-range", "luxury"],
+        index=1,
     )
-    solara.Select(
-        label="💰 Budget Level",
-        value=budget,
-        values=["budget", "mid-range", "luxury"],
-        style="margin-bottom:8px",
+    travel_style = st.selectbox(
+        "🎯 Travel Style",
+        ["cultural", "adventure", "food", "relaxation", "food and culture", "food and adventure"],
+        index=4,
     )
-    solara.Select(
-        label="🎯 Travel Style",
-        value=style,
-        values=["cultural", "adventure", "food", "relaxation",
-                "food and culture", "food and adventure"],
-        style="margin-bottom:8px",
+    group_type = st.selectbox(
+        "👥 Group Type",
+        ["solo", "couple", "family", "group"],
+        index=1,
     )
-    solara.Select(
-        label="👥 Group Type",
-        value=group,
-        values=["solo", "couple", "family", "group"],
-        style="margin-bottom:8px",
+    interests_txt = st.text_input(
+        "✨ Special Interests (comma-separated)",
+        value="local food, museums, wine bars",
     )
-    solara.InputText(
-        label="✨ Special Interests (comma-separated)",
-        value=interests_txt,
-        style="margin-bottom:16px",
-    )
-    solara.Button(
-        label="🗺️  Plan My Trip!",
-        on_click=plan_trip,
-        disabled=loading.value,
-        class_="tp-btn",
-        color="primary",
-        style="width:100%;font-weight:700;",
-    )
+    st.divider()
 
-@solara.component
-def SourceBadges():
-    if not sources.value:
-        return
-    badges_html = "".join(
-        f"<span class='tp-source-badge'>📍 {s['destination']} · {s['type']}</span>"
-        for s in sources.value
-    )
-    solara.HTML("div", unsafe_innerHTML=f"<div style='margin-top:18px'>"
-                f"<p style='color:#5cb8ff;font-size:0.8rem;font-weight:700;"
-                f"text-transform:uppercase;letter-spacing:1px;margin-bottom:8px'>"
-                f"📚 Retrieved Sources</p>{badges_html}</div>")
+    plan_btn = st.button("🗺️ Plan My Trip!", use_container_width=True)
 
-@solara.component
-def ResultPanel():
-    if loading.value:
-        solara.ProgressLinear(indeterminate=True, color="#1565c0")
-        solara.HTML("p", unsafe_innerHTML=f"<p class='tp-status'>{status_msg.value}</p>")
+    st.markdown("---")
+    st.markdown("**📍 Destinations in KB:**")
+    st.markdown("Paris · Tokyo · Bali · New York · General Tips")
 
-    if error_msg.value:
-        solara.HTML("div", unsafe_innerHTML=f"<div class='tp-error'>{error_msg.value}</div>")
+# ── Main: Results ──────────────────────────────────────────────────────────────
+if plan_btn:
+    if not groq_key.strip():
+        st.error("⚠️ Please enter your Groq API key in the sidebar.")
+    else:
+        try:
+            # Load vectorstore (cached after first call)
+            vs = get_vectorstore()
 
-    if itinerary.value:
-        solara.Markdown(itinerary.value)
-        SourceBadges()
-    elif not loading.value and not error_msg.value:
-        solara.HTML("div", unsafe_innerHTML="""
-            <div class='tp-placeholder'>
-              <div class='tp-placeholder-icon'>✈️</div>
-              <p>Fill in your trip details and click<br>
-              <strong style='color:#5cb8ff'>🗺️ Plan My Trip!</strong> to generate<br>
-              your AI-powered itinerary.</p>
-            </div>
-        """)
+            with st.spinner("🤖 Generating your personalised itinerary..."):
+                llm = ChatGroq(
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.7,
+                    max_tokens=2048,
+                    groq_api_key=groq_key.strip(),
+                )
 
+                retriever = vs.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 4},
+                )
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", RAG_SYSTEM),
+                    ("human", "{input}"),
+                ])
 
-# ── Main Page ──────────────────────────────────────────────────────────────────
-@solara.component
-def Page():
-    solara.Title("🌍 RAG Travel Planner")
-    solara.Style(CSS)
+                def fmt(docs):
+                    return "\n\n".join(d.page_content for d in docs)
 
-    Header()
+                chain = (
+                    RunnableParallel(
+                        context=retriever | fmt,
+                        raw_docs=retriever,
+                        input=RunnablePassthrough(),
+                    )
+                    | RunnableParallel(
+                        answer=prompt | llm | StrOutputParser(),
+                        context=lambda x: x["raw_docs"],
+                    )
+                )
 
-    with solara.Row(style="align-items:flex-start; gap:0; margin:0"):
-        # ── Left: Inputs ──────────────────────────────────────────────
-        with solara.Column(style="width:340px; min-width:300px; flex-shrink:0"):
-            with solara.Column(classes=["tp-panel"]):
-                InputPanel()
+                interests = [i.strip() for i in interests_txt.split(",") if i.strip()]
+                query = (
+                    f"Plan a {duration}-day {budget} {travel_style} trip to "
+                    f"{destination} for {group_type} traveller interested in "
+                    f"{', '.join(interests) if interests else 'general sightseeing'}. "
+                    "Include restaurants, attractions, budget breakdown, insider tips."
+                )
 
-        # ── Right: Results ────────────────────────────────────────────
-        with solara.Column(style="flex:1; min-width:0"):
-            with solara.Column(classes=["tp-result"]):
-                ResultPanel()
+                result = chain.invoke(query)
+             # ── Display itinerary ──────────────────────────────────────────────
+            st.success("✅ Itinerary generated!")
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("📍 Destination", destination)
+            col2.metric("📅 Duration", f"{duration} days")
+            col3.metric("💰 Budget", budget.title())
+
+            st.markdown("---")
+            st.markdown(result["answer"])
+
+            # ── Source badges ──────────────────────────────────────────────────
+            sources = result.get("context", [])
+            if sources:
+                st.markdown("---")
+                st.markdown("#### 📚 Knowledge Sources Retrieved")
+                badges = " ".join(
+                    f"<span class='tp-source'>📍 {d.metadata.get('destination')} · {d.metadata.get('type')}</span>"
+                    for d in sources
+                )
+                st.markdown(badges, unsafe_allow_html=True)
+
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+
+else:
+    # Placeholder when no query yet
+    st.markdown("""
+    <div style='text-align:center; padding: 60px 20px; color: #3a5a7a;'>
+      <div style='font-size:4rem; margin-bottom:16px'>✈️</div>
+      <h3 style='color:#5cb8ff; margin-bottom:8px'>Ready to plan your trip?</h3>
+      <p style='font-size:1rem'>
+        Fill in your trip details in the sidebar<br>
+        and click <strong style='color:#5cb8ff'>🗺️ Plan My Trip!</strong>
+      </p>
+      <br>
+      <p style='font-size:0.85rem; color:#2a4a6a'>
+        Powered by ChromaDB semantic search · Groq Llama 3.3 70B · LangChain 1.2.15 LCEL
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
